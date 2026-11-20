@@ -1,0 +1,4 @@
+    // Drive (насыщение фильтра)
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("FILTER_DRIVE", 1), "Filter Drive",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
