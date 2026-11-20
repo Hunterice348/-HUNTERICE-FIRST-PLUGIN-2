@@ -1,0 +1,7 @@
+            // Filter (обновлённый)
+            voice->setFilterParameters(
+                filterCutoffParam->load(),
+                filterResonanceParam->load(),
+                filterDriveParam->load(),
+                static_cast<int>(filterTypeParam->load())
+            );
