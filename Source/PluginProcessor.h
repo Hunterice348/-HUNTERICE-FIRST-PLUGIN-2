@@ -1,6 +1,7 @@
 #pragma once
 
-#include <JuceHeader.h>
+// ИСПРАВЛЕНИЕ: Явное подключение модуля вместо JuceHeader.h
+#include <juce_audio_processors/juce_audio_processors.h>
 
 class HuntericeFirstPluginAudioProcessor : public juce::AudioProcessor
 {
