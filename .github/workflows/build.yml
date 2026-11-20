@@ -1,36 +1,212 @@
 name: Build VST3
 
 on:
+  # Ручной запуск из вкладки Actions
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Тип сборки'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - Debug
+
+  # Автоматическая сборка при push в main
   push:
     branches: [ main, master ]
+    paths:
+      - 'Source/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/**'
+
+  # Автоматическая сборка при pull request
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch:
+
+# Права на загрузку артефактов
+permissions:
+  contents: read
+  actions: write
+
+# Отменяем предыдущий запуск при новом push (экономия времени)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-windows:
-    name: Build Windows x64
+    name: Build Windows x64 VST3
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
+      # ============================================================
+      # 1. Checkout репозитория с подмодулями (JUCE)
+      # ============================================================
+      - name: Checkout repository with submodules
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
-      - name: Setup MSVC
+      # ============================================================
+      # 2. Проверка наличия JUCE (защита от ошибок)
+      # ============================================================
+      - name: Verify JUCE submodule
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not (Test-Path "JUCE/CMakeLists.txt")) {
+            Write-Error "JUCE submodule not found! Run: git submodule add https://github.com/juce-framework/JUCE.git"
+            exit 1
+          }
+          Write-Host "✓ JUCE submodule found"
+          Get-ChildItem JUCE -Name | Select-Object -First 10
+
+      # ============================================================
+      # 3. Настройка окружения MSVC (Visual Studio Build Tools)
+      # ============================================================
+      - name: Setup MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
+      # ============================================================
+      # 4. Проверка версии CMake
+      # ============================================================
+      - name: Verify CMake
+        shell: pwsh
+        run: |
+          cmake --version
+          Write-Host "✓ CMake ready"
+
+      # ============================================================
+      # 5. Конфигурация CMake (генерация Visual Studio solution)
+      # ============================================================
       - name: Configure CMake
-        run: cmake -B build -G "Visual Studio 17 2022" -A x64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $buildType = "${{ github.event.inputs.build_type || 'Release' }}"
+          Write-Host "Building configuration: $buildType"
 
-      - name: Build
-        run: cmake --build build --config Release --parallel
+          cmake -B build `
+                -G "Visual Studio 17 2022" `
+                -A x64 `
+                -DCMAKE_BUILD_TYPE=$buildType
 
+          Write-Host "✓ CMake configured successfully"
+
+      # ============================================================
+      # 6. Сборка проекта (параллельная компиляция)
+      # ============================================================
+      - name: Build VST3 plugin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $buildType = "${{ github.event.inputs.build_type || 'Release' }}"
+
+          cmake --build build `
+                --config $buildType `
+                --parallel
+
+          Write-Host "✓ Build completed successfully"
+
+      # ============================================================
+      # 7. Проверка наличия собранного VST3 файла
+      # ============================================================
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $buildType = "${{ github.event.inputs.build_type || 'Release' }}"
+
+          # Реальный путь артефактов JUCE:
+          # build/<TARGET_NAME>_artefacts/<CONFIG>/VST3/
+          $vst3Path = "build/HUNTERICE_FIRST_PLUGIN_artefacts/$buildType/VST3"
+
+          if (-not (Test-Path $vst3Path)) {
+            Write-Error "VST3 output directory not found at: $vst3Path"
+            Write-Host "Listing build directory contents:"
+            Get-ChildItem build -Recurse -Depth 3 | Select-Object FullName
+            exit 1
+          }
+
+          $vst3Files = Get-ChildItem $vst3Path -Filter "*.vst3" -Recurse
+          if ($vst3Files.Count -eq 0) {
+            Write-Error "No .vst3 files found in $vst3Path"
+            exit 1
+          }
+
+          Write-Host "✓ VST3 plugin found:"
+          $vst3Files | ForEach-Object { Write-Host "  - $($_.FullName) ($([math]::Round($_.Length/1MB, 2)) MB)" }
+
+      # ============================================================
+      # 8. Создание ZIP архива с VST3 плагином
+      # ============================================================
+      - name: Create ZIP archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $buildType = "${{ github.event.inputs.build_type || 'Release' }}"
+
+          # Создаём структуру для ZIP
+          $zipDir = "zip_staging/HUNTERICE_FIRST_PLUGIN"
+          New-Item -ItemType Directory -Path $zipDir -Force | Out-Null
+
+          # Копируем VST3 файл
+          $vst3Source = "build/HUNTERICE_FIRST_PLUGIN_artefacts/$buildType/VST3"
+          Copy-Item -Path "$vst3Source/*" -Destination $zipDir -Recurse -Force
+
+          # Копируем README и LICENSE если есть
+          if (Test-Path "README.md") { Copy-Item "README.md" $zipDir }
+          if (Test-Path "LICENSE")   { Copy-Item "LICENSE" $zipDir }
+
+          # Создаём ZIP
+          $zipName = "HUNTERICE_FIRST_PLUGIN-VST3-Windows-x64.zip"
+          Compress-Archive -Path "zip_staging/*" -DestinationPath $zipName -Force
+
+          Write-Host "✓ ZIP archive created: $zipName"
+          Get-ChildItem $zipName | Select-Object Name, @{N='Size(MB)';E={[math]::Round($_.Length/1MB, 2)}}
+
+      # ============================================================
+      # 9. Загрузка ZIP как GitHub Actions artifact
+      # ============================================================
       - name: Upload VST3 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: HUNTERICE_FIRST_PLUGIN-VST3-Windows
-          path: build/HUNTERICE_FIRST_PLUGIN_artefacts/Release/VST3/*.vst3
+          name: HUNTERICE_FIRST_PLUGIN-VST3-Windows-x64
+          path: HUNTERICE_FIRST_PLUGIN-VST3-Windows-x64.zip
+          retention-days: 30
+          if-no-files-found: error
+
+      # ============================================================
+      # 10. Также загружаем сырой VST3 файл (для удобства)
+      # ============================================================
+      - name: Upload raw VST3 file
+        uses: actions/upload-artifact@v4
+        with:
+          name: HUNTERICE_FIRST_PLUGIN-Raw-VST3
+          path: build/HUNTERICE_FIRST_PLUGIN_artefacts/${{ github.event.inputs.build_type || 'Release' }}/VST3/
+          retention-days: 30
+          if-no-files-found: error
+
+      # ============================================================
+      # 11. Итоговая сводка
+      # ============================================================
+      - name: Build summary
+        if: success()
+        shell: pwsh
+        run: |
+          Write-Host "========================================"
+          Write-Host "✓ BUILD SUCCESSFUL"
+          Write-Host "========================================"
+          Write-Host "Plugin: HUNTERICE FIRST PLUGIN"
+          Write-Host "Format: VST3"
+          Write-Host "Platform: Windows x64"
+          Write-Host "Configuration: ${{ github.event.inputs.build_type || 'Release' }}"
+          Write-Host "========================================"
+          Write-Host "Download artifacts from:"
+          Write-Host "  Actions → This run → Artifacts section"
+          Write-Host "========================================"
