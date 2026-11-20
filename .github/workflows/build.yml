@@ -1,7 +1,6 @@
 name: Build VST3
 
 on:
-  # Ручной запуск из вкладки Actions
   workflow_dispatch:
     inputs:
       build_type:
@@ -12,25 +11,19 @@ on:
         options:
           - Release
           - Debug
-
-  # Автоматическая сборка при push в main
   push:
     branches: [ main, master ]
     paths:
       - 'Source/**'
       - 'CMakeLists.txt'
       - '.github/workflows/**'
-
-  # Автоматическая сборка при pull request
   pull_request:
     branches: [ main, master ]
 
-# Права на загрузку артефактов
 permissions:
   contents: read
   actions: write
 
-# Отменяем предыдущий запуск при новом push (экономия времени)
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -42,30 +35,43 @@ jobs:
 
     steps:
       # ============================================================
-      # 1. Checkout репозитория с подмодулями (JUCE)
+      # 1. Checkout репозитория с попыткой загрузить подмодули
       # ============================================================
-      - name: Checkout repository with submodules
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
       # ============================================================
-      # 2. Проверка наличия JUCE (защита от ошибок)
+      # 2. Умная проверка и автозагрузка JUCE (ИСПРАВЛЕНИЕ ЗДЕСЬ)
       # ============================================================
-      - name: Verify JUCE submodule
+      - name: Verify or Auto-clone JUCE
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+         
           if (-not (Test-Path "JUCE/CMakeLists.txt")) {
-            Write-Error "JUCE submodule not found! Run: git submodule add https://github.com/juce-framework/JUCE.git"
-            exit 1
+            Write-Warning "JUCE submodule not found in repository."
+            Write-Host "Auto-cloning JUCE framework to ensure build success..."
+           
+            # Клонируем только последний коммит для скорости
+            git clone --depth 1 https://github.com/juce-framework/JUCE.git JUCE
+           
+            if (-not (Test-Path "JUCE/CMakeLists.txt")) {
+              Write-Error "Failed to clone JUCE. Check network or repository URL."
+              exit 1
+            }
+            Write-Host "✓ JUCE cloned successfully."
+          } else {
+            Write-Host "✓ JUCE submodule found in repository."
           }
-          Write-Host "✓ JUCE submodule found"
-          Get-ChildItem JUCE -Name | Select-Object -First 10
+         
+          Write-Host "JUCE contents:"
+          Get-ChildItem JUCE -Name | Select-Object -First 5
 
       # ============================================================
-      # 3. Настройка окружения MSVC (Visual Studio Build Tools)
+      # 3. Настройка окружения MSVC
       # ============================================================
       - name: Setup MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -73,16 +79,7 @@ jobs:
           arch: x64
 
       # ============================================================
-      # 4. Проверка версии CMake
-      # ============================================================
-      - name: Verify CMake
-        shell: pwsh
-        run: |
-          cmake --version
-          Write-Host "✓ CMake ready"
-
-      # ============================================================
-      # 5. Конфигурация CMake (генерация Visual Studio solution)
+      # 4. Конфигурация CMake
       # ============================================================
       - name: Configure CMake
         shell: pwsh
@@ -99,7 +96,7 @@ jobs:
           Write-Host "✓ CMake configured successfully"
 
       # ============================================================
-      # 6. Сборка проекта (параллельная компиляция)
+      # 5. Сборка проекта
       # ============================================================
       - name: Build VST3 plugin
         shell: pwsh
@@ -114,22 +111,17 @@ jobs:
           Write-Host "✓ Build completed successfully"
 
       # ============================================================
-      # 7. Проверка наличия собранного VST3 файла
+      # 6. Проверка наличия собранного VST3 файла
       # ============================================================
       - name: Verify build output
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $buildType = "${{ github.event.inputs.build_type || 'Release' }}"
-
-          # Реальный путь артефактов JUCE:
-          # build/<TARGET_NAME>_artefacts/<CONFIG>/VST3/
           $vst3Path = "build/HUNTERICE_FIRST_PLUGIN_artefacts/$buildType/VST3"
 
           if (-not (Test-Path $vst3Path)) {
             Write-Error "VST3 output directory not found at: $vst3Path"
-            Write-Host "Listing build directory contents:"
-            Get-ChildItem build -Recurse -Depth 3 | Select-Object FullName
             exit 1
           }
 
@@ -140,10 +132,10 @@ jobs:
           }
 
           Write-Host "✓ VST3 plugin found:"
-          $vst3Files | ForEach-Object { Write-Host "  - $($_.FullName) ($([math]::Round($_.Length/1MB, 2)) MB)" }
+          $vst3Files | ForEach-Object { Write-Host "  - $($_.Name) ($([math]::Round($_.Length/1MB, 2)) MB)" }
 
       # ============================================================
-      # 8. Создание ZIP архива с VST3 плагином
+      # 7. Создание ZIP архива
       # ============================================================
       - name: Create ZIP archive
         shell: pwsh
@@ -151,29 +143,24 @@ jobs:
           $ErrorActionPreference = "Stop"
           $buildType = "${{ github.event.inputs.build_type || 'Release' }}"
 
-          # Создаём структуру для ZIP
           $zipDir = "zip_staging/HUNTERICE_FIRST_PLUGIN"
           New-Item -ItemType Directory -Path $zipDir -Force | Out-Null
 
-          # Копируем VST3 файл
           $vst3Source = "build/HUNTERICE_FIRST_PLUGIN_artefacts/$buildType/VST3"
           Copy-Item -Path "$vst3Source/*" -Destination $zipDir -Recurse -Force
 
-          # Копируем README и LICENSE если есть
           if (Test-Path "README.md") { Copy-Item "README.md" $zipDir }
           if (Test-Path "LICENSE")   { Copy-Item "LICENSE" $zipDir }
 
-          # Создаём ZIP
           $zipName = "HUNTERICE_FIRST_PLUGIN-VST3-Windows-x64.zip"
           Compress-Archive -Path "zip_staging/*" -DestinationPath $zipName -Force
 
           Write-Host "✓ ZIP archive created: $zipName"
-          Get-ChildItem $zipName | Select-Object Name, @{N='Size(MB)';E={[math]::Round($_.Length/1MB, 2)}}
 
       # ============================================================
-      # 9. Загрузка ZIP как GitHub Actions artifact
+      # 8. Загрузка артефактов
       # ============================================================
-      - name: Upload VST3 artifact
+      - name: Upload VST3 artifact (ZIP)
         uses: actions/upload-artifact@v4
         with:
           name: HUNTERICE_FIRST_PLUGIN-VST3-Windows-x64
@@ -181,9 +168,6 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      # ============================================================
-      # 10. Также загружаем сырой VST3 файл (для удобства)
-      # ============================================================
       - name: Upload raw VST3 file
         uses: actions/upload-artifact@v4
         with:
@@ -191,22 +175,3 @@ jobs:
           path: build/HUNTERICE_FIRST_PLUGIN_artefacts/${{ github.event.inputs.build_type || 'Release' }}/VST3/
           retention-days: 30
           if-no-files-found: error
-
-      # ============================================================
-      # 11. Итоговая сводка
-      # ============================================================
-      - name: Build summary
-        if: success()
-        shell: pwsh
-        run: |
-          Write-Host "========================================"
-          Write-Host "✓ BUILD SUCCESSFUL"
-          Write-Host "========================================"
-          Write-Host "Plugin: HUNTERICE FIRST PLUGIN"
-          Write-Host "Format: VST3"
-          Write-Host "Platform: Windows x64"
-          Write-Host "Configuration: ${{ github.event.inputs.build_type || 'Release' }}"
-          Write-Host "========================================"
-          Write-Host "Download artifacts from:"
-          Write-Host "  Actions → This run → Artifacts section"
-          Write-Host "========================================"
