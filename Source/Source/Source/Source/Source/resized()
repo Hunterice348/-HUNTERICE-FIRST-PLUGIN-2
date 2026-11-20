@@ -1,0 +1,12 @@
+    // Filter (обновлённый — 5 элементов)
+    auto filterSection = ... // ваша секция
+    int sliderW_filter = filterSection.getWidth() / 5;  // Было 4, стало 5
+    
+    filterCutoffLabel.setBounds(filterSection.removeFromLeft(sliderW_filter).removeFromTop(20));
+    filterCutoffSlider.setBounds(filterSection.removeFromLeft(sliderW_filter).withHeight(130));
+    filterResLabel.setBounds(filterSection.removeFromLeft(sliderW_filter).removeFromTop(20));
+    filterResSlider.setBounds(filterSection.removeFromLeft(sliderW_filter).withHeight(130));
+    filterDriveLabel.setBounds(filterSection.removeFromLeft(sliderW_filter).removeFromTop(20));  // НОВОЕ
+    filterDriveSlider.setBounds(filterSection.removeFromLeft(sliderW_filter).withHeight(130));   // НОВОЕ
+    filterTypeLabel.setBounds(filterSection.removeFromLeft(sliderW_filter).removeFromTop(20));
+    filterTypeBox.setBounds(filterSection.removeFromLeft(sliderW_filter).reduced(5, 25));
