@@ -1,0 +1,20 @@
+        // 9. Filter с модуляцией (Envelope + KeyTrack + LFO)
+        float env2Modulated = filterEnvAmount * env2Value * 10000.0f;
+        float keyTrackModulated = filterKeyTrackAmount * keyTracking * 10000.0f;
+        float lfoFilterMod = filterMod * 5000.0f;
+        
+        float modulatedCutoff = filterCutoff + env2Modulated + keyTrackModulated + lfoFilterMod;
+        modulatedCutoff = juce::jlimit(20.0f, 20000.0f, modulatedCutoff);
+        
+        // Передаём ВСЕ параметры фильтра включая drive
+        filter.setParameters(
+            modulatedCutoff,
+            filterResonance,
+            filterDrive,
+            filterEnvAmount,
+            static_cast<FilterEngine::Type>(filterType)
+        );
+        
+        float filteredL = oscOutput;
+        float filteredR = oscOutput;
+        filter.processSample(filteredL, filteredR);
