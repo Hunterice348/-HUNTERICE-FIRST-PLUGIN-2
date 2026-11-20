@@ -1,70 +1,3 @@
-#include "SynthVoice.h"
-
-SynthVoice::SynthVoice()
-{
-    oscillator.initialise([](float x) { return std::sin(x); }, 128);
-    oscillator.setFrequency(440.0f);
-}
-
-bool SynthVoice::canPlaySound(juce::SynthesiserSound* sound)
-{
-    return dynamic_cast<SynthSound*>(sound) != nullptr;
-}
-
-void SynthVoice::startNote(int midiNoteNumber, float velocity, 
-                           juce::SynthesiserSound* sound, int currentPitchWheelPosition)
-{
-    juce::ignoreUnused(sound);
-    
-    currentMidiNote = midiNoteNumber;
-    currentVelocity = velocity;
-    
-    float frequency = getFrequencyForNote(midiNoteNumber);
-    oscillator.setFrequency(frequency);
-    
-    // Pitch wheel
-    pitchBendSemitones = (currentPitchWheelPosition / 8192.0f - 1.0f) * 2.0f; // ±2 полутона
-    
-    adsr.noteOn();
-    lfo.reset();
-}
-
-void SynthVoice::stopNote(float velocity, bool allowTailOff)
-{
-    juce::ignoreUnused(velocity);
-    
-    if (allowTailOff)
-        adsr.noteOff();
-    else
-    {
-        clearCurrentNote();
-        adsr.reset();
-    }
-}
-
-void SynthVoice::pitchWheelMoved(int newPitchWheelValue)
-{
-    pitchBendSemitones = (newPitchWheelValue / 8192.0f - 1.0f) * 2.0f;
-}
-
-void SynthVoice::controllerMoved(int controllerNumber, int newControllerValue)
-{
-    juce::ignoreUnused(controllerNumber, newControllerValue);
-}
-
-void SynthVoice::prepareToPlay(double sampleRate, int samplesPerBlock, int outputChannels)
-{
-    juce::ignoreUnused(samplesPerBlock, outputChannels);
-    
-    currentSampleRate = sampleRate;
-    
-    oscillator.prepare({ sampleRate, static_cast<juce::uint32>(outputChannels), static_cast<juce::uint32>(samplesPerBlock) });
-    adsr.setSampleRate(sampleRate);
-    lfo.prepare(sampleRate);
-    filter.prepare(sampleRate);
-    modMatrix.prepare(sampleRate);
-}
-
 void SynthVoice::renderNextBlock(juce::AudioBuffer<float>& outputBuffer, int startSample, int numSamples)
 {
     juce::AudioBuffer<float> tempBuffer(outputBuffer.getNumChannels(), numSamples);
@@ -72,112 +5,101 @@ void SynthVoice::renderNextBlock(juce::AudioBuffer<float>& outputBuffer, int sta
 
     for (int sample = 0; sample < numSamples; ++sample)
     {
-        // 1. Получаем значение LFO
-        float lfoValue = lfo.processSample();
-
-        // 2. Применяем pitch modulation от LFO
-        float pitchMod = modMatrix.applyPitchModulation(lfoValue);
+        // 1. Portamento
+        if (portamentoEnabled && std::abs(currentPitch - targetPitch) > 0.01f)
+            currentPitch += (targetPitch - currentPitch) * (1.0f - portamentoCoeff);
+        else
+            currentPitch = targetPitch;
+        
+        // 2. Envelope и LFO
+        float env1Value = ampEnvelope.getNextSample();
+        float env2Value = filterEnvelope.getNextSample();
+        float lfo1Value = lfo1.processSample();
+        float lfo2Value = lfo2.processSample();
+        
+        // Key tracking
+        float keyTracking = (currentPitch - 24.0f) / 96.0f;
+        keyTracking = juce::jlimit(0.0f, 1.0f, keyTracking);
+        
+        // 3. Модуляция
+        modMatrix.updateSources(env1Value, env2Value, lfo1Value, lfo2Value,
+                                currentVelocity, keyTracking, modWheelValue);
+        
+        float pitchMod = modMatrix.getModulatedValue(ModulationMatrix::Destination::Pitch);
+        float filterMod = modMatrix.getModulatedValue(ModulationMatrix::Destination::FilterCutoff);
+        float pwmMod = modMatrix.getModulatedValue(ModulationMatrix::Destination::PulseWidth);
+        float ampMod = modMatrix.getModulatedValue(ModulationMatrix::Destination::Amplitude);
+        float detuneMod = modMatrix.getModulatedValue(ModulationMatrix::Destination::Detune);
+        
+        // 4. Расчёт частоты
+        float baseFrequency = getFrequencyForNote(static_cast<int>(currentPitch));
+        float fractionalPart = currentPitch - std::floor(currentPitch);
+        float interpolatedFreq = baseFrequency * std::pow(2.0f, fractionalPart / 12.0f);
+        
+        // ИСПРАВЛЕНИЕ #3: Pitch bend применяется НА КАЖДОМ СЭМПЛЕ
         float totalPitchSemitones = pitchBendSemitones + pitchMod;
         float frequencyMultiplier = std::pow(2.0f, totalPitchSemitones / 12.0f);
+        float finalFrequency = interpolatedFreq * frequencyMultiplier;
         
-        float baseFrequency = getFrequencyForNote(currentMidiNote);
-        oscillator.setFrequency(baseFrequency * frequencyMultiplier);
-
-        // 3. Генерируем осциллятор
-        float oscValue = oscillator.processSample(0.0f);
-
-        // 4. Применяем filter modulation от LFO
-        float modulatedCutoff = modMatrix.applyFilterModulation(filterCutoff, lfoValue);
-        filter.setParameters(modulatedCutoff, filterResonance, static_cast<FilterEngine::Type>(filterType));
+        // 5. Main oscillator
+        mainOsc.setFrequency(finalFrequency);
+        mainOsc.setModulatedPulseWidth(pwmMod);
+        float mainSample = mainOsc.processSample();
         
-        float filteredL = oscValue;
-        float filteredR = oscValue;
-        filter.processSample(filteredL, filteredR);
-
-        // 5. Применяем amp modulation от LFO (tremolo)
-        float ampMod = modMatrix.applyAmpModulation(lfoValue);
-
-        // 6. Применяем ADSR envelope
-        float envelopeValue = adsr.getNextSample();
-
-        // 7. Финальная амплитуда
-        float sampleValue = filteredL * envelopeValue * currentVelocity * currentGain * ampMod;
-
-        // Записываем в буфер (стерео)
-        for (int channel = 0; channel < outputBuffer.getNumChannels(); ++channel)
+        // 6. Unison
+        float unisonSum = 0.0f;
+        if (numUnisonVoices > 1)
         {
-            tempBuffer.addSample(channel, sample, sampleValue);
+            updateUnisonDetune();
+            for (int i = 0; i < numUnisonVoices; ++i)
+            {
+                float detunedFreq = finalFrequency * unisonDetuneMultipliers[i] * (1.0f + detuneMod * 0.01f);
+                unisonOscillators[i].setFrequency(detunedFreq);
+                unisonOscillators[i].setModulatedPulseWidth(pwmMod);
+                unisonSum += unisonOscillators[i].processSample();
+            }
+            unisonSum /= numUnisonVoices;
+            mainSample = mainSample * 0.5f + unisonSum * 0.5f;
         }
+        
+        // 7. Sub oscillator
+        subOsc.setFrequency(finalFrequency);
+        float subSample = subOsc.processSample();
+        float oscOutput = mainSample * (1.0f - subMix) + subSample * subMix;
+        
+        // 8. Filter
+        float env2Modulated = filterEnvAmount * env2Value * 10000.0f;
+        float keyTrackModulated = filterKeyTrackAmount * keyTracking * 10000.0f;
+        float lfoFilterMod = filterMod * 5000.0f;
+        
+        float modulatedCutoff = filterCutoff + env2Modulated + keyTrackModulated + lfoFilterMod;
+        modulatedCutoff = juce::jlimit(20.0f, 20000.0f, modulatedCutoff);
+        
+        filter.setParameters(modulatedCutoff, filterResonance, filterDrive,
+                            static_cast<FilterEngine::Type>(filterType));
+        
+        float filteredL = oscOutput;
+        float filteredR = oscOutput;
+        filter.processSample(filteredL, filteredR);
+        
+        // 9. Amplitude modulation
+        float totalAmpMod = env1Value * (1.0f + ampMod);
+        totalAmpMod = juce::jlimit(0.0f, 1.0f, totalAmpMod);
+        
+        // 10. Финальная амплитуда
+        float sampleValue = filteredL * totalAmpMod * currentVelocity * currentGain;
+        
+        // ИСПРАВЛЕНИЕ #4: Защита от клиппинга
+        sampleValue = juce::jlimit(-0.99f, 0.99f, sampleValue);
+        
+        for (int channel = 0; channel < outputBuffer.getNumChannels(); ++channel)
+            tempBuffer.addSample(channel, sample, sampleValue);
     }
 
     outputBuffer.addFrom(0, startSample, tempBuffer, 0, 0, numSamples);
     if (outputBuffer.getNumChannels() > 1)
         outputBuffer.addFrom(1, startSample, tempBuffer, 1, 0, numSamples);
 
-    if (!adsr.isActive())
+    if (!ampEnvelope.isActive())
         clearCurrentNote();
-}
-
-void SynthVoice::setOscillatorWaveform(int waveform)
-{
-    if (waveform == currentWaveform) return;
-    currentWaveform = waveform;
-
-    switch (waveform)
-    {
-        case 0: oscillator.initialise([](float x) { return std::sin(x); }, 128); break;
-        case 1: oscillator.initialise([](float x) {
-            float xWrapped = std::fmod(x, 2.0f * juce::MathConstants<float>::pi);
-            if (xWrapped < 0.0f) xWrapped += 2.0f * juce::MathConstants<float>::pi;
-            return (xWrapped / juce::MathConstants<float>::pi) - 1.0f;
-        }, 128); break;
-        case 2: oscillator.initialise([](float x) { return std::sin(x) > 0.0f ? 1.0f : -1.0f; }, 128); break;
-        case 3: oscillator.initialise([](float x) {
-            float xWrapped = std::fmod(x, 2.0f * juce::MathConstants<float>::pi);
-            if (xWrapped < 0.0f) xWrapped += 2.0f * juce::MathConstants<float>::pi;
-            return 2.0f * std::abs(xWrapped / juce::MathConstants<float>::pi - 1.0f) - 1.0f;
-        }, 128); break;
-    }
-}
-
-void SynthVoice::setADSR(float attack, float decay, float sustain, float release)
-{
-    adsrParams.attack = attack;
-    adsrParams.decay = decay;
-    adsrParams.sustain = sustain;
-    adsrParams.release = release;
-    adsr.setParameters(adsrParams);
-}
-
-void SynthVoice::setGain(float gainDb)
-{
-    currentGain = juce::Decibels::decibelsToGain(gainDb, -60.0f);
-}
-
-void SynthVoice::setLFOParameters(float rate, int waveform)
-{
-    lfoRate = rate;
-    lfoWaveform = waveform;
-    lfo.setRate(rate);
-    lfo.setWaveform(static_cast<LFOEngine::Waveform>(waveform));
-}
-
-void SynthVoice::setFilterParameters(float cutoff, float resonance, int type)
-{
-    filterCutoff = cutoff;
-    filterResonance = resonance;
-    filterType = type;
-}
-
-void SynthVoice::setModulationAmounts(float pitchMod, float filterMod, float ampMod)
-{
-    pitchModAmount = pitchMod;
-    filterModAmount = filterMod;
-    ampModAmount = ampMod;
-    modMatrix.setModulationAmounts(pitchMod, filterMod, ampMod);
-}
-
-float SynthVoice::getFrequencyForNote(int noteNumber)
-{
-    return 440.0f * std::pow(2.0f, (noteNumber - 69) / 12.0f);
 }
