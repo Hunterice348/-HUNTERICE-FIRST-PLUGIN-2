@@ -1,0 +1,7 @@
+// Preset Browser (в header)
+presetLabel.setBounds(20, 10, 60, 25);
+presetBox.setBounds(85, 10, 300, 25);
+prevPresetBtn.setBounds(390, 10, 30, 25);
+nextPresetBtn.setBounds(425, 10, 30, 25);
+savePresetBtn.setBounds(460, 10, 60, 25);
+loadPresetBtn.setBounds(525, 10, 60, 25);
