@@ -1,6 +1,9 @@
 #pragma once
 
-#include <JuceHeader.h>
+// ИСПРАВЛЕНИЕ: Явное подключение необходимых модулей GUI и привязок
+#include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_audio_processors/juce_audio_processors.h>
+
 #include "PluginProcessor.h"
 
 class HuntericeFirstPluginAudioProcessorEditor : public juce::AudioProcessorEditor
