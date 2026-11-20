@@ -44,20 +44,18 @@ jobs:
           fetch-depth: 0
 
       # ============================================================
-      # 2. Умная проверка и автозагрузка JUCE (ИСПРАВЛЕНИЕ ЗДЕСЬ)
+      # 2. Умная проверка и автозагрузка JUCE (защита от ошибки подмодуля)
       # ============================================================
       - name: Verify or Auto-clone JUCE
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-         
+          
           if (-not (Test-Path "JUCE/CMakeLists.txt")) {
             Write-Warning "JUCE submodule not found in repository."
             Write-Host "Auto-cloning JUCE framework to ensure build success..."
-           
-            # Клонируем только последний коммит для скорости
             git clone --depth 1 https://github.com/juce-framework/JUCE.git JUCE
-           
+            
             if (-not (Test-Path "JUCE/CMakeLists.txt")) {
               Write-Error "Failed to clone JUCE. Check network or repository URL."
               exit 1
@@ -66,12 +64,9 @@ jobs:
           } else {
             Write-Host "✓ JUCE submodule found in repository."
           }
-         
-          Write-Host "JUCE contents:"
-          Get-ChildItem JUCE -Name | Select-Object -First 5
 
       # ============================================================
-      # 3. Настройка окружения MSVC
+      # 3. Настройка окружения MSVC (Visual Studio Build Tools)
       # ============================================================
       - name: Setup MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -79,7 +74,7 @@ jobs:
           arch: x64
 
       # ============================================================
-      # 4. Конфигурация CMake
+      # 4. Конфигурация CMake (ИСПРАВЛЕНО: убран жесткий -G)
       # ============================================================
       - name: Configure CMake
         shell: pwsh
@@ -88,8 +83,9 @@ jobs:
           $buildType = "${{ github.event.inputs.build_type || 'Release' }}"
           Write-Host "Building configuration: $buildType"
 
+          # CMake автоматически определит правильную версию Visual Studio 
+          # на основе переменных окружения, настроенных предыдущим шагом.
           cmake -B build `
-                -G "Visual Studio 17 2022" `
                 -A x64 `
                 -DCMAKE_BUILD_TYPE=$buildType
 
